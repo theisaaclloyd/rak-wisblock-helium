@@ -17,7 +17,7 @@ Copy each of these values into config and you're ready to upload the code to the
 ### Create a decoder function [(better instructions)](https://docs.helium.com/use-the-network/console/functions)
 Now, navigate to https://console.helium.com/functions/new and enter a name. Choose 'Decoder' for function type and 'Custom Script' for Choose format.
 Under 'STEP 2 - ENTER CUSTOM SCRIPT' copy and pase the contents of decoder.js and hit save function.
-Just add the function to the device and create some integration and you're ready to go!
+Just add the function to the device and create an integration and you're ready to go!
 
 For better instructions for any of the above, please see https://docs.helium.com/use-the-network/console/quickstart/.
 
