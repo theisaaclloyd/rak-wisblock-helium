@@ -1,0 +1,183 @@
+#include <Arduino.h>
+#include <LoRaWan-RAK4630.h>
+#include <SPI.h>
+#include "config.h"
+#include "DHT.h"
+
+static lmh_param_t lora_param_init = { lorawan_adr, lorawan_datarate, LORAWAN_PUBLIC_NETWORK, lorawan_join_trials, lorawan_tx_power, LORAWAN_DUTYCYCLE_OFF };
+static lmh_callback_t lora_callbacks = { BoardGetBatteryLevel, BoardGetUniqueId, BoardGetRandomSeed, lorawan_rx_handler, lorawan_has_joined_handler, lorawan_confirm_class_handler, lorawan_join_failed_handler };
+
+DeviceClass_t lorawan_current_class = lorawan_class;
+lmh_confirm lorawan_current_confirm = lora_confirm;
+uint8_t lorawan_app_port = lorawan_port;
+
+static uint8_t m_lora_app_data_buffer[lorawan_buffer_size];
+static lmh_app_data_t m_lora_app_data = {m_lora_app_data_buffer, 0, 0, 0, 0};
+
+TimerEvent_t lora_tx_timer;
+
+DHT dht(dhtPin, dhtType);
+
+void setup() {
+  pinMode(blue, OUTPUT);
+  pinMode(green, OUTPUT);
+  
+  ledOn(blue);
+  ledOn(green);
+
+  lora_rak4630_init();
+  delay(5000);
+
+  time_t timeout = millis();
+  
+  Serial.begin(115200);
+  while (!Serial) { if ((millis() - timeout) < 5000) delay(100); else break; }
+
+  dht.begin();
+  
+  ledOff(green);
+  ledOff(blue);
+  
+  Serial.println("+=====================================");
+  Serial.println("| RAK4630 + The People's Network");
+  Serial.println("| Join type: OTAA");
+  Serial.println("| Region: US915");
+  Serial.println("+=====================================");
+
+  uint32_t err_code;
+  
+  err_code = timers_init();
+  if (err_code != 0) {
+    Serial.printf("timers_init failed - %d\n", err_code);
+    criticalError();
+  }
+
+  lmh_setDevEui(nodeDeviceEUI);
+  lmh_setAppEui(nodeAppEUI);
+  lmh_setAppKey(nodeAppKey);
+
+  err_code = lmh_init(&lora_callbacks, lora_param_init, true,  CLASS_A, LORAMAC_REGION_US915);
+  if (err_code != 0) {
+    Serial.printf("lmh_init failed - %d\n", err_code);
+    criticalError();
+  }
+
+  ledOn(green);
+
+  Serial.println("Starting join");
+  
+  lmh_join();
+  
+  Serial.println("Return from join");
+}
+
+void loop() {
+  // empty loop
+}
+
+void lorawan_has_joined_handler(void) {  
+  Serial.println("Network joined via OTAA!");
+
+  lmh_error_status ret = lmh_class_request(lorawan_current_class);
+  
+  if (ret == LMH_SUCCESS) {
+    delay(1000);
+    lora_tx_periodic_handler(); //start timer and send data
+  }
+  
+  ledOff(green);
+}
+
+void lorawan_join_failed_handler(void) { 
+  Serial.printf("OTAA network join failed after %d trials\nNo more network joins will be attempted\r\n", lorawan_join_trials);
+  criticalError();
+}
+
+void lorawan_rx_handler(lmh_app_data_t *app_data) { Serial.printf("LoRa Packet received on port %d, size:%d, rssi:%d, snr:%d, data:%s\n", app_data->port, app_data->buffsize, app_data->rssi, app_data->snr, app_data->buffer); }
+
+void lorawan_confirm_class_handler(DeviceClass_t Class) {
+  Serial.printf("Switching to class %c finished\n", "ABC"[Class]);
+  
+  m_lora_app_data.buffsize = 0;
+  m_lora_app_data.port = lorawan_app_port;
+  lmh_send(&m_lora_app_data, lorawan_current_confirm);
+}
+
+void lora_send(void) {
+  if (lmh_join_status_get() != LMH_SET) {
+    Serial.println("Not Set! Trying send again later");
+    return;
+  }
+
+  memset(m_lora_app_data.buffer, 0, lorawan_buffer_size);
+  m_lora_app_data.port = lorawan_app_port;
+
+  float hum = dht.readHumidity();
+  float temp = dht.readTemperature(true);
+  float heatindex = dht.computeHeatIndex(temp, hum);
+
+  /*if (isnan(hum) || isnan(temp) || isnan(heatindex)) {
+    Serial.println("Error!");
+    return;
+  }*/
+
+  //Serial.printf("Temp: %f, Humidity: %f, Heatindex: %f\n", temp, hum, heatindex);
+  Serial.print("Temp: ");
+  Serial.println(temp);
+
+  uint16_t t = temp * 100;
+  uint16_t h = hum * 100;
+  uint16_t hif = heatindex * 100;
+
+  uint32_t i = 0;
+
+  m_lora_app_data.buffer[i++] = 0x01; // first byte whatever, you could use it for a unique id for each device or something
+  
+  m_lora_app_data.buffer[i++] = (uint8_t)(t >> 8);
+  m_lora_app_data.buffer[i++] = (uint8_t)t;
+  
+  m_lora_app_data.buffer[i++] = (uint8_t)(h >> 8);
+  m_lora_app_data.buffer[i++] = (uint8_t)h;
+  
+  m_lora_app_data.buffer[i++] = (uint8_t)(hif >> 8);
+  m_lora_app_data.buffer[i++] = (uint8_t)hif;
+  
+  m_lora_app_data.buffsize = i;
+
+  /*loraData[0] = 0x01
+  
+  loraData[1] = (uint8_t)(t >> 8);
+  loraData[2] = (uint8_t)t;
+
+  loraData[3] = (uint8_t)(h >> 8);
+  loraData[4] = (uint8_t)h;
+
+  for (uint32_t i = 0; i<sizeof(loraData); i++) {
+    m_lora_app_data.buffer[i] = loraData[i];
+  }*/
+
+  lmh_error_status error = lmh_send(&m_lora_app_data, lorawan_current_confirm);
+  
+  if (error == LMH_SUCCESS) {
+    send_sucess++;
+    Serial.printf("lmh_send ok count %d\n", send_sucess);
+  }
+  else {
+    send_fail++;
+    Serial.printf("lmh_send fail count %d\n", send_fail);
+  }
+}
+
+void lora_tx_periodic_handler(void) {
+  TimerSetValue(&lora_tx_timer, lorawan_tx_interval);
+  TimerStart(&lora_tx_timer);
+  
+  Serial.println("Sending now...");
+
+  lora_send();
+}
+
+uint32_t timers_init(void) {
+  TimerInit(&lora_tx_timer, lora_tx_periodic_handler);
+  return 0;
+}
